@@ -1,0 +1,290 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pecera</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #04162e; cursor: crosshair }
+  canvas { position: absolute; image-rendering: pixelated }
+  div { position: absolute; inset: 0; pointer-events: none }
+  #led { background: radial-gradient(circle, transparent 2.3px, #04162e 3px) 0 0 / 6px 6px }
+  #glass { background: linear-gradient(#ffffff38, #fff0 38%); box-shadow: inset 0 0 70px #00b4ff66 }
+</style>
+<canvas id="c"></canvas>
+<div id="led"></div>
+<div id="glass"></div>
+<script>
+const C = 6, TW = 128, TH = 96, PI = Math.PI
+const cv = document.getElementById('c'), g = cv.getContext('2d'), led = document.getElementById('led')
+const w = new SharedWorker('worker.js?v=3').port
+const tmp = new OffscreenCanvas(TW, TH), tg = tmp.getContext('2d')
+let S, bg, P, items = [], W = 0, H = 0, D = 0, ox = 0, oy = 0, cx0 = 0, cy0 = 0, sent = '', seed = 1
+const rnd = () => (seed = seed * 1664525 + 1013904223 >>> 0) / 4294967296
+const pick = a => a[rnd() * a.length | 0]
+const h = (x, y) => { const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s) }
+
+// matrices: P = perspective (camera W px in front of the glass, aimed at the screen centre), rot = yaw * pitch
+const mul = (M, v) => M.map(r => r[0] * v[0] + r[1] * v[1] + r[2] * v[2] + r[3] * v[3])
+const rot = (yaw, p) => {
+  const c = Math.cos(yaw), s = Math.sin(yaw), cp = Math.cos(p), sp = Math.sin(p)
+  return [[c * cp, -c * sp, -s, 0], [sp, cp, 0, 0], [s * cp, -s * sp, c, 0], [0, 0, 0, 1]]
+}
+const pw = (x, y, z) => { const q = mul(P, [x, y, z, 1]); return [q[0] / q[3] / C, q[1] / q[3] / C, W / q[3]] }
+const proj = (x, y, z) => { const q = pw(x, y, z); q[0] -= cx0; q[1] -= cy0; return q }
+
+// [length px, rx, ry, body top, body bottom, fins, tail, marks, snout, banner]
+// marks: ['r', colour, x, width] band · ['e', colour, x, y, rx, ry, angle] blob · ['l', colour, gap, width, angle] lines
+const K = '#111', Y = '#ffd21a', WH = '#fff', O = '#f08a1a'
+const SPEC = [
+  [150, 44, 30, WH, '#e6edf5', Y, Y, [['l', '#333', 7, 1.5, 0], ['r', K, .52, .2], ['e', K, -.8, -.5, .3, .7]]],
+  [130, 42, 29, WH, '#eef', Y, Y, [['e', '#345', .05, -.9, .22, 1.1], ['e', '#345', -.45, -.9, .22, 1], ['r', K, .55, .18], ['r', Y, -1, .25]]],
+  [120, 44, 21, '#ff8a1f', '#f26a10', '#f26a10', '#ff8a1f', [['r', K, .26, .3], ['r', WH, .3, .22], ['r', K, -.24, .34], ['r', WH, -.2, .26], ['r', K, -.84, .22], ['r', WH, -.8, .14]]],
+  [140, 42, 31, '#ffe93a', '#f5c800', '#ffd91a', '#ffd91a', [], 10],
+  [150, 44, 28, '#5fb4ff', '#3d8ff0', Y, '#3d8ff0', [['e', '#101a40', .85, -.1, .4, .8], ['e', WH, .8, .75, .35, .4], ['r', Y, -1, .18]]],
+  [110, 44, 21, '#ff9a1a', '#ff7a00', K, '#ff9a1a', [['r', K, .2, .4], ['r', WH, .28, .24], ['r', K, -.3, .44], ['r', WH, -.22, .28], ['r', K, -.9, .3], ['r', WH, -.82, .14]]],
+  [130, 44, 19, '#ffb02e', '#ff7a12', '#ff9a1a', '#ffb84a', [['e', '#ffd98a', .1, .6, .7, .4]]],
+  [150, 40, 31, WH, WH, WH, K, [['r', K, .25, .5], ['r', '#ffe14a', -.5, .35], ['r', K, -.85, .35], ['e', O, 1, -.1, .25, .2]], 14, 1],
+  [130, 40, 30, WH, WH, Y, Y, [['e', K, .3, 0, .18, 1.4, .35], ['e', K, -.35, .2, .22, 1.4, .35], ['r', Y, -1, .3]], 6, 1],
+  [420],
+  [180, 46, 29, '#1b4fd8', '#1b4fd8', '#1b4fd8', Y, [['l', Y, 7, 3, 1.45], ['e', '#0a1a50', .7, -.1, .2, 1.2], ['e', '#bfe6ff', .98, .1, .2, .9]]],
+  [120, 44, 24, '#ff5a2a', '#e03a10', '#c8320e', '#ff5a2a', [['r', K, .34, .22], ['r', WH, .38, .14]]],
+  [140, 44, 29, WH, '#fff7c0', Y, Y, [['e', Y, -.7, 0, .5, 1.2], ['l', '#666', 8, 1.2, .7], ['r', K, .55, .17], ['e', K, -.5, -.8, .14, .2]]],
+  [140, 40, 30, WH, '#f4f4f4', WH, WH, [['r', O, .5, .16], ['r', O, .05, .18], ['r', O, -.4, .18], ['r', O, -.85, .16], ['e', K, -.5, -.75, .13, .2]], 20],
+  [160, 45, 27, '#ffb81a', '#ff9a10', '#2a3fc0', Y, [['l', '#eaf6ff', 12, 4, .15], ['l', '#1a2a80', 12, 1.2, .15]]],
+  [130, 42, 29, '#ffe14a', '#f5c800', Y, Y, [['l', '#b08a00', 7, 1, .8], ['l', '#b08a00', 7, 1, -.8], ['r', K, .55, .17], ['e', K, -1, 0, .12, 1]]],
+  [150, 43, 30, '#ffe01a', '#ffc800', Y, Y, [['l', O, 7, 1.2, 0], ['e', '#3a5a8a', .6, .15, .2, .35]]],
+  [140, 38, 27, '#ffe01a', '#ffd000', Y, WH, [['e', K, 1, -.6, .55, .6], ['e', WH, 1, .6, .55, .6], ['e', K, -.8, .6, .1, .15]], 26],
+  [150, 46, 24, '#1a5cff', '#1040d0', '#1a5cff', Y, [['e', '#0a1030', -.1, -.45, .75, .3], ['e', '#0a1030', .5, -.3, .3, .35], ['e', '#1a5cff', 0, -.3, .4, .12], ['e', Y, -1.05, 0, .3, .5]]]
+]
+
+function paint([, rx, ry, c1, c2, fin, tail, marks, snout = 0, banner]) {
+  const c = new OffscreenCanvas(TW, TH), q = c.getContext('2d'), X = 64, Y0 = 48
+  const dot = (x, y, r, col) => { q.fillStyle = col; q.beginPath(); q.arc(x, y, r, 0, 7); q.fill() }
+  const shape = pts => { q.beginPath(); pts.forEach((p, i) => i ? q.lineTo(...p) : q.moveTo(...p)); q.fill() }
+  if (!rx) {
+    const gr = q.createLinearGradient(0, 28, 0, 64)
+    gr.addColorStop(0, '#6f86a6'); gr.addColorStop(.6, '#9fb4cc'); gr.addColorStop(1, '#eef4fa')
+    q.fillStyle = '#5f7696'
+    shape([[62, 34], [50, 12], [76, 32]]); shape([[14, 51], [0, 38], [5, 51], [0, 64]]); shape([[88, 58], [76, 76], [96, 60]])
+    q.fillStyle = gr
+    q.beginPath(); q.moveTo(8, 50); q.bezierCurveTo(40, 28, 88, 24, 112, 43); q.lineTo(126, 50); q.lineTo(110, 55); q.bezierCurveTo(86, 68, 40, 60, 8, 53); q.fill()
+    dot(106, 46, 2.2, K)
+    return c
+  }
+  q.fillStyle = tail
+  shape([[X - rx + 6, Y0], [6, Y0 - ry * .75], [14, Y0], [6, Y0 + ry * .75]])
+  q.fillStyle = fin
+  q.beginPath(); q.ellipse(X - rx * .15, Y0, rx * .8, ry + 7, 0, 0, 7); q.fill()
+  if (banner) { q.strokeStyle = WH; q.lineWidth = 4; q.beginPath(); q.moveTo(X, Y0 - ry); q.quadraticCurveTo(X - 5, 0, X - 55, 14); q.stroke() }
+  q.save()
+  q.beginPath(); q.ellipse(X, Y0, rx, ry, 0, 0, 7)
+  if (snout) { q.moveTo(X + rx - 8, Y0 - 7); q.lineTo(X + rx + snout, Y0 + 1); q.lineTo(X + rx - 8, Y0 + 9) }
+  q.clip()
+  const gr = q.createLinearGradient(0, Y0 - ry, 0, Y0 + ry)
+  gr.addColorStop(0, c1); gr.addColorStop(1, c2)
+  q.fillStyle = gr
+  q.fillRect(0, 0, TW, TH)
+  for (const m of marks) {
+    q.fillStyle = m[1]
+    if (m[0] == 'r') q.fillRect(X + m[2] * rx, 0, m[3] * rx, TH)
+    if (m[0] == 'e') { q.beginPath(); q.ellipse(X + m[2] * rx, Y0 + m[3] * ry, m[4] * rx, m[5] * ry, m[6] || 0, 0, 7); q.fill() }
+    if (m[0] == 'l') { q.save(); q.translate(X, Y0); q.rotate(m[4]); for (let x = -84; x < 84; x += m[2]) q.fillRect(x, -90, m[3], 180); q.restore() }
+  }
+  const gl = q.createLinearGradient(0, Y0 - ry, 0, Y0 + ry)
+  gl.addColorStop(0, '#fff6'); gl.addColorStop(.45, '#fff0'); gl.addColorStop(1, '#0003')
+  q.fillStyle = gl
+  q.fillRect(0, 0, TW, TH)
+  q.restore()
+  dot(X + rx * .62, Y0 - ry * .18, 4.5, WH)
+  dot(X + rx * .62, Y0 - ry * .18, 3, '#000')
+  return c
+}
+const TEX = SPEC.map(paint)
+
+const PASTEL = ['#ff8fc8', '#ffd24a', '#7ff0d0', '#b79cff', '#ff9a4a', '#9fe0ff', '#f6f6ff']
+const tree = (q, x, y, a, len, wd, n, spread) => {
+  const x2 = x + Math.cos(a) * len, y2 = y + Math.sin(a) * len
+  q.lineWidth = wd
+  q.beginPath(); q.moveTo(x, y); q.lineTo(x2, y2); q.stroke()
+  if (n) for (let i = 0; i < 2 + (rnd() < .4); i++) tree(q, x2, y2, a + (rnd() - .5) * spread, len * .74, wd * .78, n - 1, spread)
+}
+// [painter on a 128x128 canvas with its base at (64,128), min height px, extra height px, sway]
+const KIND = [
+  [q => {
+    const gr = q.createLinearGradient(0, 10, 0, 128)
+    gr.addColorStop(0, pick(['#7f8fe0', '#9a80d8', '#5fa0e0'])); gr.addColorStop(1, '#1a2a78')
+    q.fillStyle = gr
+    q.beginPath(); q.moveTo(0, 128)
+    for (let x = 0; x <= 128; x += 8) q.lineTo(x, 128 - Math.sin(x / 128 * PI) ** .6 * (75 + rnd() * 40))
+    q.lineTo(128, 128); q.fill()
+    q.globalCompositeOperation = 'source-atop'
+    for (let i = 0; i < 70; i++) { q.fillStyle = pick(PASTEL) + 'b0'; q.beginPath(); q.arc(rnd() * 128, 20 + rnd() * 108, 2 + rnd() * 6, 0, 7); q.fill() }
+  }, 260, 240, 0],
+  [q => { q.strokeStyle = pick(['#ff8a3a', '#ff6aa8', '#ffd24a', '#c08cff']); tree(q, 64, 128, -PI / 2, 30, 8, 4, 1.5) }, 140, 110, .015],
+  [q => { q.strokeStyle = pick(['#c8ee2a', '#ffe14a', '#5ff0b0']); for (let i = -2; i <= 2; i++) tree(q, 64, 128, -PI / 2 + i * .32, 24, 3, 5, .7) }, 160, 120, .05],
+  [q => {
+    const c = pick(['#ffe6f2', '#ffb04a', '#d9b8ff', '#ff8fc8'])
+    for (let i = 0; i < 34; i++) {
+      const a = -PI / 2 + (rnd() - .5) * 2.6, l = 55 + rnd() * 55, x = 64 + Math.cos(a) * l * .6, y = 128 + Math.sin(a) * l
+      q.strokeStyle = c; q.lineWidth = 5
+      q.beginPath(); q.moveTo(64 + (rnd() - .5) * 30, 128); q.quadraticCurveTo(64 + Math.cos(a) * l * .25, 128 - l * .7, x, y); q.stroke()
+      q.fillStyle = WH; q.beginPath(); q.arc(x, y, 3.5, 0, 7); q.fill()
+    }
+  }, 110, 90, .07],
+  [q => {
+    const c = pick(['#a070ff', '#5f8cff', '#ff7ab8'])
+    for (let i = 0; i < 8; i++) {
+      const x = 18 + rnd() * 92, hh = 40 + rnd() * 80, r = 6 + rnd() * 5
+      q.fillStyle = c; q.beginPath(); q.roundRect(x - r, 128 - hh, r * 2, hh, r); q.fill()
+      q.fillStyle = '#2a1a60'; q.beginPath(); q.ellipse(x, 128 - hh + r * .7, r * .6, r * .35, 0, 0, 7); q.fill()
+    }
+  }, 120, 90, .01],
+  [q => {
+    q.fillStyle = pick(['#8fd0ff', '#ffb0d0', '#b8f0c0'])
+    q.beginPath(); q.ellipse(64, 128, 60, 90, 0, PI, 2 * PI); q.fill()
+    q.globalCompositeOperation = 'source-atop'; q.strokeStyle = '#ffffffaa'; q.lineWidth = 3
+    for (let i = 0; i < 40; i++) { const a = rnd() * 7; q.beginPath(); q.arc(rnd() * 128, 40 + rnd() * 88, 6, a, a + 3); q.stroke() }
+  }, 80, 70, 0],
+  [q => {
+    q.strokeStyle = pick(['#2fd27a', '#7fe04a', '#1fb88a']); q.lineWidth = 6
+    for (let i = 0; i < 6; i++) {
+      const x = 30 + rnd() * 68, hh = 70 + rnd() * 55
+      q.beginPath(); q.moveTo(x, 128)
+      for (let k = 1; k <= 6; k++) q.lineTo(x + Math.sin(k * 1.3 + i) * 7, 128 - hh * k / 6)
+      q.stroke()
+    }
+  }, 200, 150, .12]
+]
+const fog = z => `rgba(12,60,210,${.42 * z / D})`
+
+function build() {
+  P = [[W, 0, W / 2, 0], [0, W, H / 2, 0], [0, 0, 1, 0], [0, 0, 1, W]]
+  const Wc = Math.ceil(W / C), Hc = Math.ceil(H / C), b = (bg = new OffscreenCanvas(Wc, Hc)).getContext('2d')
+  const [x0, y0] = pw(0, 0, D), [x1, y1] = pw(W, H, D)
+  const face = (pts, gx, gy, hx, hy, c0, c1) => {
+    const gr = b.createLinearGradient(gx, gy, hx, hy)
+    gr.addColorStop(0, c0); gr.addColorStop(1, c1)
+    b.fillStyle = gr
+    b.beginPath(); pts.forEach((p, i) => i ? b.lineTo(...p) : b.moveTo(...p)); b.fill()
+  }
+  face([[0, 0], [x0, y0], [x0, y1], [0, Hc]], 0, 0, x0, 0, '#0a2a9a', '#1a5fe0')
+  face([[Wc, 0], [x1, y0], [x1, y1], [Wc, Hc]], Wc, 0, x1, 0, '#0a2a9a', '#1a5fe0')
+  face([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], 0, y0, 0, y1, '#2a7bff', '#0b3fd0')
+  face([[0, 0], [Wc, 0], [x1, y0], [x0, y0]], 0, 0, 0, y0, '#c8f6ff', '#49b6ff')
+  face([[0, Hc], [Wc, Hc], [x1, y1], [x0, y1]], 0, y1, 0, Hc, '#7fc4f0', '#f2fbff')
+  for (let y = 0; y < Hc; y++) for (let x = 0; x < Wc; x++) {
+    const n = h(x >> 1, y >> 1)
+    if (n > .85 || n < .12) { b.fillStyle = n > .5 ? '#ffffff18' : '#00104018'; b.fillRect(x, y, 1, 1) }
+  }
+  seed = 7
+  items = []
+  for (let i = 0; i < 80; i++) {
+    const ki = pick([0, 0, 1, 1, 2, 2, 3, 3, 3, 4, 4, 5, 6, 6]), k = KIND[ki], z = D * (ki ? .03 + .94 * rnd() : .3 + .65 * rnd())
+    const tex = new OffscreenCanvas(128, 128), q = tex.getContext('2d')
+    q.lineCap = q.lineJoin = 'round'
+    k[0](q)
+    q.globalCompositeOperation = 'source-atop'
+    q.fillStyle = fog(z)
+    q.fillRect(0, 0, 128, 128)
+    items.push({ x: rnd() * W, z, hh: (k[1] + rnd() * k[2]) * 1.35, sway: k[3], tex })
+  }
+}
+
+function item(it, i, t) {
+  const [ex, ey, s] = proj(it.x, H, it.z), k = it.hh * s / C / 128
+  if (ex < -k * 64 - 9 || ex > cv.width + k * 64 + 9) return
+  g.setTransform(k, 0, Math.sin(t * 1.1 + i) * it.sway * k, k, ex, ey)
+  g.drawImage(it.tex, -64, -128)
+}
+
+function fish(x, y, z, yaw, pitch, ph, sp) {
+  const L = SPEC[sp][0] * .8, M = rot(yaw + Math.sin(ph) * .1, pitch), F = mul(M, [L, 0, 0, 0]), G = mul(M, [0, L, 0, 0])
+  const [ex, ey] = proj(x, y, z), [fx, fy] = proj(x + F[0], y + F[1], z + F[2]), [gx, gy] = proj(x + G[0], y + G[1], z + G[2])
+  let a = (fx - ex) / 64, b = (fy - ey) / 64, c = (gx - ex) / 64, d = (gy - ey) / 64
+  const m = .3 * Math.hypot(c, d)
+  if (Math.hypot(a, b) < m) a = a < 0 ? -m : m, b = 0
+  tg.globalCompositeOperation = 'copy'
+  tg.drawImage(TEX[sp], 0, 0)
+  tg.globalCompositeOperation = 'source-atop'
+  tg.fillStyle = fog(z)
+  tg.fillRect(0, 0, TW, TH)
+  g.setTransform(a, b, c, d, ex, ey)
+  for (let i = 7, xc = 64; i >= 0; i--) {
+    const bend = Math.sin(ph - i * .7) * (1 - i / 7), wi = sp == 9 ? 16 : 16 * Math.cos(bend)
+    xc -= wi
+    g.drawImage(tmp, i * 16, 0, 16, TH, xc, -48 + (sp == 9 ? bend * 7 : 0), wi + .4, TH)
+  }
+}
+
+function bubble(x, y, z, r) {
+  const [ex, ey, s] = proj(x, y, z), rr = r * s / C
+  g.setTransform(1, 0, 0, 1, 0, 0)
+  g.beginPath(); g.arc(ex, ey, rr, 0, 7)
+  g.fillStyle = '#ffffff38'; g.fill()
+  g.strokeStyle = '#ffffffe0'; g.lineWidth = .7; g.stroke()
+  g.fillStyle = WH; g.beginPath(); g.arc(ex - rr * .4, ey - rr * .4, rr * .28, 0, 7); g.fill()
+}
+
+const hello = () => w.postMessage({ r: sent.split(',').map(Number), s: [(screen.availLeft || 0) + screen.width, (screen.availTop || 0) + screen.height] })
+
+function frame() {
+  requestAnimationFrame(frame)
+  const bd = (outerWidth - innerWidth) / 2
+  ox = screenX + bd
+  oy = screenY + outerHeight - innerHeight - bd
+  const key = [ox, oy, innerWidth, innerHeight].join()
+  if (key != sent) sent = key, hello()
+  const cols = Math.ceil(innerWidth / C) + 1, rows = Math.ceil(innerHeight / C) + 1
+  if (cv.width != cols || cv.height != rows) {
+    cv.width = cols
+    cv.height = rows
+    cv.style.width = cols * C + 'px'
+    cv.style.height = rows * C + 'px'
+  }
+  cx0 = Math.floor(ox / C)
+  cy0 = Math.floor(oy / C)
+  const fx = cx0 * C - ox, fy = cy0 * C - oy
+  cv.style.left = fx + 'px'
+  cv.style.top = fy + 'px'
+  led.style.backgroundPosition = `${fx}px ${fy}px`
+  g.setTransform(1, 0, 0, 1, 0, 0)
+  g.imageSmoothingQuality = 'high'
+  g.fillStyle = '#0a2a9a'
+  g.fillRect(0, 0, cols, rows)
+  if (!S) return
+  g.drawImage(bg, -cx0, -cy0)
+  const t = Date.now() / 1000, Wc = bg.width, Hc = bg.height
+
+  g.fillStyle = WH
+  for (let i = 0; i < 6; i++) {
+    const x = (i + .3 + h(i, 5)) * Wc / 6 - cx0 + Math.sin(t * .2 + i) * 6, wd = 6 + h(i, 6) * 10, y0 = -cy0, y1 = Hc * .9 - cy0
+    g.globalAlpha = .07 + .04 * Math.sin(t * .7 + i * 2)
+    g.beginPath()
+    g.moveTo(x, y0)
+    g.lineTo(x + wd, y0)
+    g.lineTo(x + wd - Hc * .35, y1)
+    g.lineTo(x - wd - Hc * .35, y1)
+    g.fill()
+  }
+  g.globalAlpha = 1
+
+  const list = items.map((it, i) => [it.z, () => item(it, i, t)])
+  for (let i = 0; i < S.f.length; i += 7) list.push([S.f[i + 2], () => fish(...S.f.slice(i, i + 7))])
+  for (let i = 0; i < 36; i++) {
+    const e = i % 12, z = h(e, 41) * D, r = 14 + h(i, 42) * 22, range = H * .95
+    list.push([z, () => bubble(h(e, 40) * W + Math.sin(t * 2 + i) * 10, H - (t * (50 + h(i, 43) * 70) + h(i, 44) * range) % range, z, r)])
+  }
+  list.sort((p, q) => q[0] - p[0]).forEach(e => e[1]())
+  g.setTransform(1, 0, 0, 1, 0, 0)
+}
+
+w.onmessage = e => {
+  if (W != e.data.W || H != e.data.H) W = e.data.W, H = e.data.H, D = W * .5, build()
+  S = e.data
+}
+const at = e => [e.clientX + ox, e.clientY + oy]
+onpointermove = e => w.postMessage({ m: at(e) })
+onpointerdown = e => w.postMessage({ c: at(e) })
+document.documentElement.onpointerleave = () => w.postMessage({ m: null })
+onpagehide = () => w.postMessage({ bye: 1 })
+setInterval(hello, 500)
+frame()
+</script>
